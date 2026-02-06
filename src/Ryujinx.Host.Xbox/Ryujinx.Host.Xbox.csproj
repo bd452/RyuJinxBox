@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ryujinx.Audio\Ryujinx.Audio.csproj" />
+    <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+    <ProjectReference Include="..\Ryujinx.Cpu\Ryujinx.Cpu.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.GAL\Ryujinx.Graphics.GAL.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Gpu\Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Vulkan\Ryujinx.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Xbox\Ryujinx.Graphics.Xbox.csproj" />
+    <ProjectReference Include="..\Ryujinx.Input\Ryujinx.Input.csproj" />
+    <ProjectReference Include="..\Ryujinx.HLE\Ryujinx.HLE.csproj" />
+    <ProjectReference Include="..\Ryujinx.Memory\Ryujinx.Memory.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.Vulkan" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
+  </ItemGroup>
+
+</Project>

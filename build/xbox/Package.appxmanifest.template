@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Template AppX manifest for the Ryujinx Xbox port.
+  
+  This template needs to be customized with:
+  - Publisher identity (from Xbox Developer account)
+  - Application display name and description
+  - Logo assets
+  
+  For deployment:
+  1. Copy this to Package.appxmanifest
+  2. Fill in publisher identity details
+  3. Create required logo assets (see Assets section)
+  4. Package with makeappx or Visual Studio
+-->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap mp rescap">
+
+  <Identity
+    Name="Ryujinx.Xbox"
+    Publisher="CN=PLACEHOLDER"
+    Version="1.0.0.0" />
+
+  <mp:PhoneIdentity PhoneProductId="00000000-0000-0000-0000-000000000000" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
+
+  <Properties>
+    <DisplayName>Ryujinx</DisplayName>
+    <PublisherDisplayName>Ryujinx</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Xbox" MinVersion="10.0.22621.0" MaxVersionTested="10.0.25398.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+      Executable="$targetnametoken$.exe"
+      EntryPoint="$targetentrypoint$">
+      <uap:VisualElements
+        DisplayName="Ryujinx"
+        Description="Nintendo Switch emulator"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"/>
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="expandedResources" />
+  </Capabilities>
+
+</Package>

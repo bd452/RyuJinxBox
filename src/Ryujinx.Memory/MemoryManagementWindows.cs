@@ -31,9 +31,19 @@ namespace Ryujinx.Memory
             return AllocateInternal(size, AllocationType.Reserve);
         }
 
-        private static nint AllocateInternal(nint size, AllocationType flags = 0)
+        private static nint AllocateInternal(nint size, AllocationType flags = 0, MemoryProtection protection = MemoryProtection.ReadWrite)
         {
-            nint ptr = WindowsApi.VirtualAlloc(nint.Zero, size, flags, MemoryProtection.ReadWrite);
+            nint ptr;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: Use VirtualAllocFromApp which accepts a uint protection parameter
+                ptr = WindowsApi.VirtualAllocFromApp(nint.Zero, size, flags, (uint)protection);
+            }
+            else
+            {
+                ptr = WindowsApi.VirtualAlloc(nint.Zero, size, flags, protection);
+            }
 
             if (ptr == nint.Zero)
             {
@@ -45,7 +55,21 @@ namespace Ryujinx.Memory
 
         private static nint AllocateInternal2(nint size, AllocationType flags = 0)
         {
-            nint ptr = WindowsApi.VirtualAlloc2(WindowsApi.CurrentProcessHandle, nint.Zero, size, flags, MemoryProtection.NoAccess, nint.Zero, 0);
+            nint ptr;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: VirtualAlloc2 from KernelBase.dll may not be available.
+                // Fall back to VirtualAllocFromApp without placeholder support.
+                // This means view-compatible memory won't work, but SoftwarePageTable
+                // mode doesn't need it.
+                AllocationType fallbackFlags = flags & ~AllocationType.ReservePlaceholder;
+                ptr = WindowsApi.VirtualAllocFromApp(nint.Zero, size, fallbackFlags, (uint)MemoryProtection.NoAccess);
+            }
+            else
+            {
+                ptr = WindowsApi.VirtualAlloc2(WindowsApi.CurrentProcessHandle, nint.Zero, size, flags, MemoryProtection.NoAccess, nint.Zero, 0);
+            }
 
             if (ptr == nint.Zero)
             {
@@ -57,7 +81,18 @@ namespace Ryujinx.Memory
 
         public static void Commit(nint location, nint size)
         {
-            if (WindowsApi.VirtualAlloc(location, size, AllocationType.Commit, MemoryProtection.ReadWrite) == nint.Zero)
+            nint result;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                result = WindowsApi.VirtualAllocFromApp(location, size, AllocationType.Commit, (uint)MemoryProtection.ReadWrite);
+            }
+            else
+            {
+                result = WindowsApi.VirtualAlloc(location, size, AllocationType.Commit, MemoryProtection.ReadWrite);
+            }
+
+            if (result == nint.Zero)
             {
                 throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
             }
@@ -73,11 +108,25 @@ namespace Ryujinx.Memory
 
         public static void MapView(nint sharedMemory, ulong srcOffset, nint location, nint size, MemoryBlock owner)
         {
+            if (WindowsApi.IsUwpSandbox)
+            {
+                throw new PlatformNotSupportedException(
+                    "View-compatible memory mapping (MapViewOfFile3) is not available in the Xbox UWP sandbox. " +
+                    "Use MemoryManagerMode.SoftwarePageTable instead of HostMapped/HostMappedUnsafe.");
+            }
+
             _placeholders.MapView(sharedMemory, srcOffset, location, size, owner);
         }
 
         public static void UnmapView(nint sharedMemory, nint location, nint size, MemoryBlock owner)
         {
+            if (WindowsApi.IsUwpSandbox)
+            {
+                throw new PlatformNotSupportedException(
+                    "View-compatible memory mapping (UnmapViewOfFile2) is not available in the Xbox UWP sandbox. " +
+                    "Use MemoryManagerMode.SoftwarePageTable instead of HostMapped/HostMappedUnsafe.");
+            }
+
             _placeholders.UnmapView(sharedMemory, location, size, owner);
         }
 
@@ -86,6 +135,18 @@ namespace Ryujinx.Memory
             if (forView)
             {
                 return _placeholders.ReprotectView(address, size, permission);
+            }
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP enforces W^X: PAGE_EXECUTE_READWRITE is forbidden.
+                // Downgrade RWX requests to RW (callers follow up with RX when done writing).
+                if (permission == MemoryPermission.ReadWriteExecute)
+                {
+                    permission = MemoryPermission.ReadAndWrite;
+                }
+
+                return WindowsApi.VirtualProtectFromApp(address, size, (uint)WindowsApi.GetProtection(permission), out _);
             }
             else
             {
@@ -102,15 +163,33 @@ namespace Ryujinx.Memory
 
         public static nint CreateSharedMemory(nint size, bool reserve)
         {
-            FileMapProtection prot = reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit;
+            nint handle;
 
-            nint handle = WindowsApi.CreateFileMapping(
-                WindowsApi.InvalidHandleValue,
-                nint.Zero,
-                FileMapProtection.PageReadWrite | prot,
-                (uint)(size.ToInt64() >> 32),
-                (uint)size.ToInt64(),
-                null);
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: CreateFileMappingFromApp uses a different signature
+                uint prot = (uint)(FileMapProtection.PageReadWrite |
+                    (reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit));
+
+                handle = WindowsApi.CreateFileMappingFromApp(
+                    WindowsApi.InvalidHandleValue,
+                    nint.Zero,
+                    prot,
+                    (ulong)size.ToInt64(),
+                    null);
+            }
+            else
+            {
+                FileMapProtection prot = reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit;
+
+                handle = WindowsApi.CreateFileMapping(
+                    WindowsApi.InvalidHandleValue,
+                    nint.Zero,
+                    FileMapProtection.PageReadWrite | prot,
+                    (uint)(size.ToInt64() >> 32),
+                    (uint)size.ToInt64(),
+                    null);
+            }
 
             if (handle == nint.Zero)
             {

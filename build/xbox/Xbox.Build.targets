@@ -1,0 +1,31 @@
+<Project>
+  <!--
+    Xbox-specific build targets for Ryujinx Xbox port.
+    
+    Handles:
+    - DXVK library packaging
+    - Xbox Developer Mode deployment preparation
+    - AppX manifest generation helpers
+  -->
+
+  <!-- Copy DXVK libraries to output when building for Xbox -->
+  <Target Name="CopyDxvkLibraries" AfterTargets="Build" Condition="'$(IsXboxBuild)' == 'true'">
+    <ItemGroup>
+      <DxvkFiles Include="$(SolutionDir)external\dxvk\**\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DxvkFiles)" 
+          DestinationFolder="$(OutputPath)dxvk"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(SolutionDir)external\dxvk')" />
+  </Target>
+
+  <!-- Generate a deployment manifest summary -->
+  <Target Name="GenerateXboxDeploymentInfo" AfterTargets="Publish" Condition="'$(IsXboxBuild)' == 'true'">
+    <Message Importance="high" Text="Xbox deployment package prepared at: $(PublishDir)" />
+    <Message Importance="high" Text="Remember to:" />
+    <Message Importance="high" Text="  1. Place DXVK libraries in the output dxvk/ directory" />
+    <Message Importance="high" Text="  2. Configure AppxManifest.xml for UWP packaging" />
+    <Message Importance="high" Text="  3. Deploy via Xbox Device Portal or Visual Studio" />
+  </Target>
+
+</Project>

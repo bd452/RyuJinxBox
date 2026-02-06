@@ -1,0 +1,42 @@
+<Project>
+  <!--
+    Xbox-specific build properties for Ryujinx Xbox port.
+    
+    This file configures the build for Xbox Series S/X deployment
+    via Xbox Developer Mode (UWP/GameCore-compatible environment).
+    
+    Usage: Import this in project files or pass as MSBuild property.
+    Example: dotnet build -p:CustomAfterMicrosoftCSharpTargets=build/xbox/Xbox.Build.props
+  -->
+
+  <PropertyGroup>
+    <IsXboxBuild>true</IsXboxBuild>
+    <DefineConstants>$(DefineConstants);XBOX</DefineConstants>
+    
+    <!-- Target x64 only for Xbox Series S/X -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    
+    <!-- Xbox requires self-contained deployment -->
+    <SelfContained>true</SelfContained>
+    
+    <!-- Enable AOT-friendly compilation settings -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredCompilation>true</TieredCompilation>
+    
+    <!-- Trim unused code to reduce package size -->
+    <PublishTrimmed>false</PublishTrimmed>
+    
+    <!-- Xbox UWP app packaging -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Optimize for Xbox release builds -->
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+  </PropertyGroup>
+
+</Project>

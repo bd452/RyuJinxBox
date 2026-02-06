@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap mp rescap">
+
+  <Identity
+    Name="Ryujinx.Xbox"
+    Publisher="CN=RyujinxDev"
+    Version="1.0.0.0" />
+
+  <Properties>
+    <DisplayName>Ryujinx</DisplayName>
+    <PublisherDisplayName>Ryujinx</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!--
+      Target Xbox Series S/X in Developer Mode.
+      Also works on desktop Windows 10+ for testing.
+    -->
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.25398.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+      Executable="Ryujinx.Xbox.exe"
+      EntryPoint="Ryujinx.Xbox.Program">
+      <uap:VisualElements
+        DisplayName="Ryujinx"
+        Description="Nintendo Switch Emulator for Xbox"
+        BackgroundColor="#1E1E1E"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1E1E1E" />
+      </uap:VisualElements>
+
+      <!-- File type associations for removableStorage access to USB drives -->
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="switchrom">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.xci</uap:FileType>
+              <uap:FileType>.nsp</uap:FileType>
+              <uap:FileType>.nca</uap:FileType>
+              <uap:FileType>.nro</uap:FileType>
+              <uap:FileType>.nso</uap:FileType>
+              <uap:FileType>.pfs0</uap:FileType>
+              <uap:FileType>.keys</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <uap:Capability Name="removableStorage" />
+    <rescap:Capability Name="expandedResources" />
+    <rescap:Capability Name="broadFileSystemAccess" />
+  </Capabilities>
+
+</Package>
