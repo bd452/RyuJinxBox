@@ -1,9 +1,11 @@
 using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
 using Ryujinx.Common.Logging;
+using Ryujinx.Host.Xbox.Native;
 using Ryujinx.Memory;
 using System;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Threading;
 using static Ryujinx.Audio.Integration.IHardwareDeviceDriver;
 
@@ -11,27 +13,17 @@ namespace Ryujinx.Host.Xbox.Audio
 {
     /// <summary>
     /// XAudio2-based hardware audio device driver for Xbox.
-    ///
-    /// Key design decisions:
-    ///   - Low-latency buffer configuration for tight audio timing expected by Switch games
-    ///   - Avoids large ring buffers that would introduce latency
-    ///   - Uses XAudio2's native callback mechanism for buffer completion
-    ///
-    /// On actual Xbox hardware, this would use the Xbox GDK XAudio2 implementation.
-    /// The P/Invoke signatures target xaudio2_9redist.dll / XAudio2 from the GDK.
+    /// Uses real COM interop to XAudio2 via P/Invoke.
     /// </summary>
-    public sealed class XAudio2HardwareDeviceDriver : IHardwareDeviceDriver
+    public sealed unsafe class XAudio2HardwareDeviceDriver : IHardwareDeviceDriver
     {
-        /// <summary>
-        /// Low-latency buffer size: 10ms worth of samples at 48kHz stereo 16-bit.
-        /// Switch games expect tight audio timing, so we keep buffers small.
-        /// </summary>
-        private const int LowLatencyBufferMs = 10;
-
         private readonly ManualResetEvent _updateRequiredEvent;
         private readonly ManualResetEvent _pauseEvent;
         private readonly ConcurrentDictionary<XAudio2HardwareDeviceSession, byte> _sessions;
         private bool _isDisposed;
+
+        private nint _pXAudio2;
+        private nint _pMasteringVoice;
 
         public float Volume { get; set; }
 
@@ -42,128 +34,103 @@ namespace Ryujinx.Host.Xbox.Audio
             _sessions = new ConcurrentDictionary<XAudio2HardwareDeviceSession, byte>();
             Volume = 1.0f;
 
-            Logger.Info?.Print(LogClass.Audio, "XAudio2 hardware device driver initialized for Xbox.");
+            int hr = XAudio2Native.XAudio2Create(out _pXAudio2, 0, XAudio2Native.XAUDIO2_DEFAULT_PROCESSOR);
+            if (hr < 0)
+            {
+                Logger.Error?.Print(LogClass.Audio, $"XAudio2Create failed with HRESULT 0x{hr:X8}");
+                _pXAudio2 = nint.Zero;
+                return;
+            }
 
-            // On actual Xbox:
-            // 1. Call XAudio2Create() to get IXAudio2 instance
-            // 2. Call CreateMasteringVoice() for output
-            // 3. Configure low-latency processing
+            hr = XAudio2Native.CreateMasteringVoice(_pXAudio2, out _pMasteringVoice, 2, 48000);
+            if (hr < 0)
+            {
+                Logger.Error?.Print(LogClass.Audio, $"CreateMasteringVoice failed with HRESULT 0x{hr:X8}");
+                XAudio2Native.ComRelease(_pXAudio2);
+                _pXAudio2 = nint.Zero;
+                _pMasteringVoice = nint.Zero;
+                return;
+            }
+
+            // Start the audio engine
+            XAudio2Native.ComCall(_pXAudio2, XAudio2Native.VTable_StartEngine);
+
+            Logger.Info?.Print(LogClass.Audio, "XAudio2 initialized successfully.");
         }
 
-        /// <summary>
-        /// Whether the XAudio2 backend is supported on the current platform.
-        /// On actual Xbox hardware, this would verify XAudio2 availability via the GDK.
-        /// </summary>
         public static bool IsSupported
         {
             get
             {
-                // On actual Xbox, attempt to create an XAudio2 instance to verify support.
-                // For build compatibility on non-Xbox platforms, this returns false.
-                return OperatingSystem.IsWindows();
+                if (!OperatingSystem.IsWindows())
+                    return false;
+
+                // Try creating XAudio2 to verify support
+                int hr = XAudio2Native.XAudio2Create(out nint pXAudio2, 0, XAudio2Native.XAUDIO2_DEFAULT_PROCESSOR);
+                if (hr >= 0 && pXAudio2 != nint.Zero)
+                {
+                    XAudio2Native.ComRelease(pXAudio2);
+                    return true;
+                }
+                return false;
             }
         }
 
-        public ManualResetEvent GetUpdateRequiredEvent()
-        {
-            return _updateRequiredEvent;
-        }
+        internal nint XAudio2Handle => _pXAudio2;
 
-        public ManualResetEvent GetPauseEvent()
-        {
-            return _pauseEvent;
-        }
+        public ManualResetEvent GetUpdateRequiredEvent() => _updateRequiredEvent;
+        public ManualResetEvent GetPauseEvent() => _pauseEvent;
 
         public IHardwareDeviceSession OpenDeviceSession(Direction direction, IVirtualMemoryManager memoryManager, SampleFormat sampleFormat, uint sampleRate, uint channelCount)
         {
-            if (channelCount == 0)
-            {
-                channelCount = 2;
-            }
-
-            if (sampleRate == 0)
-            {
-                sampleRate = 48000;
-            }
+            if (channelCount == 0) channelCount = 2;
+            if (sampleRate == 0) sampleRate = 48000;
 
             if (direction != Direction.Output)
-            {
-                throw new NotImplementedException("Input direction is not supported on Xbox XAudio2 backend.");
-            }
+                throw new NotImplementedException("Input direction is not supported on XAudio2 backend.");
+
+            if (_pXAudio2 == nint.Zero)
+                throw new InvalidOperationException("XAudio2 is not initialized.");
 
             var session = new XAudio2HardwareDeviceSession(this, memoryManager, sampleFormat, sampleRate, channelCount);
             _sessions.TryAdd(session, 0);
-
             return session;
         }
 
-        internal bool UnregisterSession(XAudio2HardwareDeviceSession session)
-        {
-            return _sessions.TryRemove(session, out _);
-        }
+        internal bool UnregisterSession(XAudio2HardwareDeviceSession session) =>
+            _sessions.TryRemove(session, out _);
 
-        /// <summary>
-        /// Calculates the buffer size in bytes for low-latency audio.
-        /// </summary>
-        internal static int GetLowLatencyBufferSize(uint sampleRate, uint channelCount, SampleFormat format)
-        {
-            int bytesPerSample = format switch
-            {
-                SampleFormat.PcmInt8 => 1,
-                SampleFormat.PcmInt16 => 2,
-                SampleFormat.PcmInt24 => 3,
-                SampleFormat.PcmInt32 => 4,
-                SampleFormat.PcmFloat => 4,
-                _ => 2,
-            };
-
-            return (int)(sampleRate * channelCount * bytesPerSample * LowLatencyBufferMs / 1000);
-        }
-
-        public bool SupportsDirection(Direction direction)
-        {
-            return direction == Direction.Output;
-        }
-
-        public bool SupportsSampleRate(uint sampleRate)
-        {
-            // XAudio2 supports a wide range of sample rates
-            return sampleRate is > 0 and <= 200000;
-        }
-
-        public bool SupportsSampleFormat(SampleFormat sampleFormat)
-        {
-            return sampleFormat != SampleFormat.PcmInt24;
-        }
-
-        public bool SupportsChannelCount(uint channelCount)
-        {
-            // Support mono, stereo, and 5.1 surround
-            return channelCount is 1 or 2 or 6;
-        }
+        public bool SupportsDirection(Direction direction) => direction == Direction.Output;
+        public bool SupportsSampleRate(uint sampleRate) => sampleRate is > 0 and <= 200000;
+        public bool SupportsSampleFormat(SampleFormat sampleFormat) => sampleFormat != SampleFormat.PcmInt24;
+        public bool SupportsChannelCount(uint channelCount) => channelCount is 1 or 2 or 6;
 
         public void Dispose()
         {
-            if (_isDisposed)
-            {
-                return;
-            }
-
+            if (_isDisposed) return;
             _isDisposed = true;
 
             foreach (var session in _sessions.Keys)
-            {
                 session.Dispose();
-            }
 
             _sessions.Clear();
+
+            if (_pMasteringVoice != nint.Zero)
+            {
+                XAudio2Native.VoiceDestroy(_pMasteringVoice);
+                _pMasteringVoice = nint.Zero;
+            }
+
+            if (_pXAudio2 != nint.Zero)
+            {
+                XAudio2Native.ComRelease(_pXAudio2);
+                _pXAudio2 = nint.Zero;
+            }
 
             _updateRequiredEvent.Dispose();
             _pauseEvent.Dispose();
 
-            Logger.Info?.Print(LogClass.Audio, "XAudio2 hardware device driver disposed.");
-
-            // On actual Xbox: Release IXAudio2 COM object
+            Logger.Info?.Print(LogClass.Audio, "XAudio2 driver disposed.");
         }
     }
 }

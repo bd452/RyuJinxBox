@@ -1,32 +1,33 @@
 using Ryujinx.Audio.Backends.Common;
 using Ryujinx.Audio.Common;
 using Ryujinx.Common.Logging;
+using Ryujinx.Common.Memory;
+using Ryujinx.Host.Xbox.Native;
 using Ryujinx.Memory;
 using System;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Ryujinx.Host.Xbox.Audio
 {
     /// <summary>
-    /// XAudio2-based audio device session for Xbox.
-    ///
-    /// Uses a small buffer queue to maintain low latency:
-    ///   - Switch games expect tight audio timing
-    ///   - Avoids large ring buffers
-    ///   - Relies on XAudio2 buffer completion callbacks
+    /// XAudio2-based audio session using real COM interop.
+    /// Manages an IXAudio2SourceVoice and feeds it audio buffers from the emulator.
     /// </summary>
-    public sealed class XAudio2HardwareDeviceSession : HardwareDeviceSessionOutputBase
+    public sealed unsafe class XAudio2HardwareDeviceSession : HardwareDeviceSessionOutputBase
     {
-        private const int MaxBufferCount = 4;
-
         private readonly XAudio2HardwareDeviceDriver _driver;
-        private readonly ConcurrentQueue<AudioBuffer> _queuedBuffers;
-        private readonly ConcurrentQueue<AudioBuffer> _releasedBuffers;
+        private readonly ConcurrentQueue<XAudio2AudioBuffer> _queuedBuffers;
+        private readonly DynamicRingBuffer _ringBuffer;
+        private readonly ManualResetEvent _updateRequiredEvent;
+        private readonly int _bytesPerFrame;
+        private readonly uint _sampleCount;
 
+        private nint _pSourceVoice;
         private ulong _playedSampleCount;
         private float _volume;
-        private bool _isActive;
+        private bool _started;
         private bool _isDisposed;
 
         public XAudio2HardwareDeviceSession(
@@ -38,114 +39,184 @@ namespace Ryujinx.Host.Xbox.Audio
             : base(memoryManager, sampleFormat, sampleRate, channelCount)
         {
             _driver = driver;
-            _queuedBuffers = new ConcurrentQueue<AudioBuffer>();
-            _releasedBuffers = new ConcurrentQueue<AudioBuffer>();
+            _updateRequiredEvent = _driver.GetUpdateRequiredEvent();
+            _queuedBuffers = new ConcurrentQueue<XAudio2AudioBuffer>();
+            _ringBuffer = new DynamicRingBuffer();
             _volume = 1.0f;
 
-            // On actual Xbox:
-            // 1. Create IXAudio2SourceVoice with callback
-            // 2. Configure low-latency buffer parameters
-            // 3. Set format to match requested sample format/rate/channels
+            _bytesPerFrame = BackendHelper.GetSampleSize(RequestedSampleFormat) * (int)RequestedChannelCount;
+            // Target ~10ms buffer at the given sample rate
+            _sampleCount = Math.Max(480, sampleRate / 100);
+
+            CreateSourceVoice();
+        }
+
+        private void CreateSourceVoice()
+        {
+            XAudio2Native.WAVEFORMATEX format = new()
+            {
+                nChannels = (ushort)RequestedChannelCount,
+                nSamplesPerSec = RequestedSampleRate,
+                wBitsPerSample = (ushort)(BackendHelper.GetSampleSize(RequestedSampleFormat) * 8),
+            };
+
+            format.nBlockAlign = (ushort)(format.nChannels * format.wBitsPerSample / 8);
+            format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+            format.cbSize = 0;
+
+            format.wFormatTag = RequestedSampleFormat switch
+            {
+                SampleFormat.PcmFloat => XAudio2Native.WAVE_FORMAT_IEEE_FLOAT,
+                _ => XAudio2Native.WAVE_FORMAT_PCM,
+            };
+
+            int hr = XAudio2Native.CreateSourceVoice(
+                _driver.XAudio2Handle,
+                out _pSourceVoice,
+                &format,
+                0,     // flags
+                2.0f,  // maxFrequencyRatio
+                nint.Zero);
+
+            if (hr < 0)
+            {
+                Logger.Error?.Print(LogClass.Audio, $"CreateSourceVoice failed with HRESULT 0x{hr:X8}");
+                _pSourceVoice = nint.Zero;
+            }
+            else
+            {
+                Logger.Debug?.Print(LogClass.Audio,
+                    $"XAudio2 source voice created: {RequestedChannelCount}ch, {RequestedSampleRate}Hz, {RequestedSampleFormat}");
+            }
         }
 
         public override void QueueBuffer(AudioBuffer buffer)
         {
-            if (_isDisposed)
-            {
-                return;
-            }
+            if (_isDisposed || _pSourceVoice == nint.Zero) return;
 
-            _queuedBuffers.Enqueue(buffer);
+            XAudio2AudioBuffer driverBuffer = new(buffer.DataPointer, GetSampleCount(buffer));
+            _ringBuffer.Write(buffer.Data, 0, buffer.Data.Length);
+            _queuedBuffers.Enqueue(driverBuffer);
 
-            if (_isActive)
+            if (_started)
             {
-                SubmitPendingBuffers();
+                SubmitRingBufferData();
             }
         }
 
-        /// <summary>
-        /// Submits queued buffers to XAudio2 source voice.
-        /// On actual Xbox, this would call IXAudio2SourceVoice::SubmitSourceBuffer.
-        /// </summary>
-        private void SubmitPendingBuffers()
+        private void SubmitRingBufferData()
         {
-            while (_queuedBuffers.TryDequeue(out AudioBuffer buffer))
-            {
-                // On actual Xbox:
-                // XAUDIO2_BUFFER xaudioBuffer = new()
-                // {
-                //     AudioBytes = (uint)buffer.DataSize,
-                //     pAudioData = bufferDataPointer,
-                //     pContext = bufferContext
-                // };
-                // sourceVoice.SubmitSourceBuffer(ref xaudioBuffer);
+            if (_pSourceVoice == nint.Zero) return;
 
-                // For now, simulate immediate consumption
-                ulong sampleCount = GetSampleCount(buffer);
-                Interlocked.Add(ref _playedSampleCount, sampleCount);
-                _releasedBuffers.Enqueue(buffer);
+            // Check how many buffers XAudio2 currently has queued
+            XAudio2Native.SourceVoiceGetState(_pSourceVoice, out var state, 0);
+
+            // Keep at most 3 buffers queued to maintain low latency
+            if (state.BuffersQueued >= 3) return;
+
+            int bytesAvailable = _ringBuffer.Length;
+            if (bytesAvailable == 0) return;
+
+            int targetBytes = (int)(_sampleCount * _bytesPerFrame);
+            int bytesToRead = Math.Min(bytesAvailable, targetBytes);
+
+            // Align to frame boundary
+            bytesToRead = bytesToRead / _bytesPerFrame * _bytesPerFrame;
+            if (bytesToRead == 0) return;
+
+            byte[] data = new byte[bytesToRead];
+            _ringBuffer.Read(data, 0, bytesToRead);
+
+            // Pin the buffer and submit to XAudio2
+            GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+
+            XAudio2Native.XAUDIO2_BUFFER xaBuffer = new()
+            {
+                AudioBytes = (uint)bytesToRead,
+                pAudioData = (byte*)handle.AddrOfPinnedObject(),
+                pContext = GCHandle.ToIntPtr(handle),
+            };
+
+            int hr = XAudio2Native.SourceVoiceSubmitSourceBuffer(_pSourceVoice, &xaBuffer);
+            if (hr < 0)
+            {
+                Logger.Error?.Print(LogClass.Audio, $"SubmitSourceBuffer failed: 0x{hr:X8}");
+                handle.Free();
+                return;
+            }
+
+            // Track sample count
+            ulong samplesSubmitted = GetSampleCount(bytesToRead);
+            Interlocked.Add(ref _playedSampleCount, samplesSubmitted);
+
+            // Check if any queued emulator buffers are consumed
+            bool needUpdate = false;
+            ulong availableSamples = samplesSubmitted;
+
+            while (availableSamples > 0 && _queuedBuffers.TryPeek(out XAudio2AudioBuffer driverBuffer))
+            {
+                ulong remaining = driverBuffer.SampleCount - Interlocked.Read(ref driverBuffer.SamplePlayed);
+                ulong played = Math.Min(remaining, availableSamples);
+                ulong current = Interlocked.Add(ref driverBuffer.SamplePlayed, played);
+                availableSamples -= played;
+
+                if (current >= driverBuffer.SampleCount)
+                {
+                    _queuedBuffers.TryDequeue(out _);
+                    needUpdate = true;
+                }
+            }
+
+            if (needUpdate)
+            {
+                _updateRequiredEvent.Set();
             }
         }
 
         public override void Start()
         {
-            if (_isDisposed || _isActive)
-            {
-                return;
-            }
+            if (_isDisposed || _started || _pSourceVoice == nint.Zero) return;
+            _started = true;
 
-            _isActive = true;
-
-            // On actual Xbox: sourceVoice.Start()
-            SubmitPendingBuffers();
-
-            Logger.Debug?.Print(LogClass.Audio, "XAudio2 session started.");
+            XAudio2Native.SourceVoiceStart(_pSourceVoice);
+            SubmitRingBufferData();
         }
 
         public override void Stop()
         {
-            if (_isDisposed || !_isActive)
-            {
-                return;
-            }
+            if (_isDisposed || !_started || _pSourceVoice == nint.Zero) return;
+            _started = false;
 
-            _isActive = false;
-
-            // On actual Xbox: sourceVoice.Stop()
-
-            Logger.Debug?.Print(LogClass.Audio, "XAudio2 session stopped.");
+            XAudio2Native.SourceVoiceStop(_pSourceVoice);
         }
 
         public override void SetVolume(float volume)
         {
             _volume = Math.Clamp(volume, 0f, 1f);
-
-            // On actual Xbox: sourceVoice.SetVolume(_volume)
+            if (_pSourceVoice != nint.Zero)
+            {
+                XAudio2Native.VoiceSetVolume(_pSourceVoice, _volume * _driver.Volume);
+            }
         }
 
-        public override float GetVolume()
-        {
-            return _volume;
-        }
+        public override float GetVolume() => _volume;
 
         public override ulong GetPlayedSampleCount()
         {
-            return _playedSampleCount;
+            if (_pSourceVoice != nint.Zero)
+            {
+                XAudio2Native.SourceVoiceGetState(_pSourceVoice, out var state, 0);
+                return state.SamplesPlayed;
+            }
+            return Interlocked.Read(ref _playedSampleCount);
         }
 
         public override bool WasBufferFullyConsumed(AudioBuffer buffer)
         {
-            // Check if the buffer has been released (completed playback)
-            if (_releasedBuffers.TryPeek(out AudioBuffer releasedBuffer))
-            {
-                if (releasedBuffer.DataPointer == buffer.DataPointer)
-                {
-                    _releasedBuffers.TryDequeue(out _);
-                    return true;
-                }
-            }
+            if (!_queuedBuffers.TryPeek(out XAudio2AudioBuffer driverBuffer))
+                return true;
 
-            return false;
+            return driverBuffer.DriverIdentifier != buffer.DataPointer;
         }
 
         public override void PrepareToClose()
@@ -155,21 +226,38 @@ namespace Ryujinx.Host.Xbox.Audio
 
         public override void Dispose()
         {
-            if (_isDisposed)
-            {
-                return;
-            }
-
+            if (_isDisposed) return;
             _isDisposed = true;
+
             Stop();
+
+            if (_pSourceVoice != nint.Zero)
+            {
+                XAudio2Native.SourceVoiceFlushSourceBuffers(_pSourceVoice);
+                XAudio2Native.VoiceDestroy(_pSourceVoice);
+                _pSourceVoice = nint.Zero;
+            }
 
             _driver.UnregisterSession(this);
 
-            // On actual Xbox: sourceVoice.DestroyVoice()
-
-            // Drain remaining buffers
             while (_queuedBuffers.TryDequeue(out _)) { }
-            while (_releasedBuffers.TryDequeue(out _)) { }
+        }
+    }
+
+    /// <summary>
+    /// Tracks an audio buffer submitted to XAudio2.
+    /// </summary>
+    internal class XAudio2AudioBuffer
+    {
+        public readonly ulong DriverIdentifier;
+        public readonly ulong SampleCount;
+        public ulong SamplePlayed;
+
+        public XAudio2AudioBuffer(ulong driverIdentifier, ulong sampleCount)
+        {
+            DriverIdentifier = driverIdentifier;
+            SampleCount = sampleCount;
+            SamplePlayed = 0;
         }
     }
 }

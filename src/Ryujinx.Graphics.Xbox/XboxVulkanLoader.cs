@@ -1,94 +1,101 @@
 using Ryujinx.Common.Logging;
 using System;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace Ryujinx.Graphics.Xbox
 {
     /// <summary>
-    /// Custom Vulkan loader for Xbox that intercepts Vulkan function resolution
-    /// and routes it through DXVK's Vulkan-to-D3D12 translation layer.
+    /// Overrides Vulkan library resolution so that Vulkan calls are routed
+    /// through the D3D12-backed Vulkan ICD on Xbox.
     ///
-    /// Phase 3 requirement:
-    ///   - Replace Vulkan loader discovery with explicit DXVK bootstrap
-    ///   - All Vulkan calls go through DXVK → D3D12 → Xbox GPU
-    ///
-    /// The standard Vulkan loader expects vulkan-1.dll on the system.
-    /// On Xbox, we intercept this and use DXVK's implementation instead,
-    /// which translates all Vulkan commands to D3D12 commands.
+    /// On Xbox there is no native Vulkan driver. Instead, we ship a Vulkan ICD
+    /// (like Mesa's dozen driver) that implements Vulkan on top of D3D12.
+    /// This class ensures that when Silk.NET.Vulkan or any other library tries
+    /// to load vulkan-1.dll, it finds our D3D12-backed implementation.
     /// </summary>
     public static class XboxVulkanLoader
     {
-        /// <summary>
-        /// Whether the Xbox Vulkan loader override is active.
-        /// </summary>
         public static bool IsActive { get; private set; }
 
+        private static nint _icdLibraryHandle;
+
         /// <summary>
-        /// Installs the Xbox Vulkan loader override.
-        /// After this call, Vulkan function resolution will go through DXVK.
-        /// Must be called after DxvkBootstrap.Initialize().
+        /// Installs the Vulkan loader override.
+        /// This registers a NativeLibrary resolver that intercepts vulkan-1 loads
+        /// and redirects them to the D3D12-backed Vulkan ICD.
         /// </summary>
         public static void Install()
         {
-            if (IsActive)
-            {
-                return;
-            }
+            if (IsActive) return;
 
-            if (!DxvkBootstrap.IsInitialized)
+            // Try to pre-load the ICD library
+            _icdLibraryHandle = TryLoadVulkanIcd();
+
+            if (_icdLibraryHandle == nint.Zero)
             {
                 Logger.Warning?.Print(LogClass.Gpu,
-                    "Cannot install Xbox Vulkan loader: DXVK is not initialized. " +
-                    "Falling back to system Vulkan loader.");
+                    "Cannot find Vulkan D3D12 ICD library. " +
+                    "Using system Vulkan loader (will work on desktop, not on Xbox).");
                 return;
             }
 
-            // Register a native library resolver that intercepts vulkan-1 loads
-            // and redirects them to DXVK.
-            NativeLibrary.SetDllImportResolver(typeof(XboxVulkanLoader).Assembly, DxvkDllImportResolver);
+            // Register resolver for assemblies that load vulkan-1
+            // This covers Silk.NET.Vulkan which is used by the Vulkan renderer
+            Assembly[] targetAssemblies = AppDomain.CurrentDomain.GetAssemblies();
+            foreach (Assembly assembly in targetAssemblies)
+            {
+                string name = assembly.GetName().Name ?? "";
+                if (name.Contains("Vulkan", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Silk", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Ryujinx.Graphics", StringComparison.OrdinalIgnoreCase))
+                {
+                    NativeLibrary.SetDllImportResolver(assembly, VulkanDllImportResolver);
+                }
+            }
 
             IsActive = true;
             Logger.Info?.Print(LogClass.Gpu, "Xbox Vulkan loader override installed.");
         }
 
-        /// <summary>
-        /// DLL import resolver that redirects Vulkan library loads to DXVK.
-        /// </summary>
-        private static nint DxvkDllImportResolver(string libraryName, System.Reflection.Assembly assembly, DllImportSearchPath? searchPath)
+        private static nint TryLoadVulkanIcd()
         {
-            // Intercept vulkan-1 loads and redirect to DXVK
-            if (libraryName.Equals("vulkan-1", StringComparison.OrdinalIgnoreCase) ||
-                libraryName.Equals("vulkan-1.dll", StringComparison.OrdinalIgnoreCase) ||
-                libraryName.Equals("libvulkan", StringComparison.OrdinalIgnoreCase) ||
-                libraryName.Equals("libvulkan.so.1", StringComparison.OrdinalIgnoreCase))
+            // Try to load the ICD that DxvkBootstrap found
+            nint addr = DxvkBootstrap.GetVkGetInstanceProcAddr();
+            if (addr != nint.Zero)
             {
-                nint dxvkProc = DxvkBootstrap.GetDxvkProcAddress("vkGetInstanceProcAddr");
-
-                if (dxvkProc != nint.Zero)
+                // The ICD is already loaded by DxvkBootstrap, get its module handle
+                string[] names = ["vulkan_dzn.dll", "vulkan_dzn"];
+                foreach (string name in names)
                 {
-                    Logger.Debug?.Print(LogClass.Gpu, $"Redirected '{libraryName}' to DXVK.");
-                    // Return the DXVK library handle for Vulkan calls
+                    if (NativeLibrary.TryLoad(name, out nint handle))
+                        return handle;
                 }
             }
 
-            // Let the default resolver handle other libraries
+            // Try loading vulkan-1.dll (will work if VK_ICD_FILENAMES is set correctly)
+            if (NativeLibrary.TryLoad("vulkan-1.dll", out nint vkHandle))
+                return vkHandle;
+
             return nint.Zero;
         }
 
-        /// <summary>
-        /// Resolves a Vulkan function through DXVK.
-        /// This is used by the Vulkan renderer to get function pointers.
-        /// </summary>
-        /// <param name="functionName">The Vulkan function name (e.g., "vkCreateInstance").</param>
-        /// <returns>Function pointer to the DXVK implementation.</returns>
-        public static nint GetProcAddress(string functionName)
+        private static nint VulkanDllImportResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
         {
-            if (!IsActive)
+            if (IsVulkanLibrary(libraryName) && _icdLibraryHandle != nint.Zero)
             {
-                return nint.Zero;
+                return _icdLibraryHandle;
             }
 
-            return DxvkBootstrap.GetDxvkProcAddress(functionName);
+            // Let the default resolver handle non-Vulkan libraries
+            return nint.Zero;
         }
+
+        private static bool IsVulkanLibrary(string name) =>
+            name.Equals("vulkan-1", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("vulkan-1.dll", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("libvulkan", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("libvulkan.so.1", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("libvulkan.dylib", StringComparison.OrdinalIgnoreCase);
     }
 }

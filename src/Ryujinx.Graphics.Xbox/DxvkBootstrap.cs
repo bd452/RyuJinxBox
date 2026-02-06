@@ -6,152 +6,149 @@ using System.Runtime.InteropServices;
 namespace Ryujinx.Graphics.Xbox
 {
     /// <summary>
-    /// Bootstraps the DXVK translation layer for Xbox.
+    /// Bootstraps the Vulkan-over-D3D12 ICD for Xbox.
     ///
-    /// Phase 3 requirements:
-    ///   - Replace Vulkan loader discovery with explicit DXVK bootstrap
-    ///   - Disable implicit desktop Vulkan layers
-    ///   - D3D12 backend only
-    ///   - Pipeline cache enabled with aggressive reuse
+    /// Architecture:
+    ///   Ryujinx Vulkan Renderer (SPIR-V)
+    ///         ↓
+    ///   Vulkan ICD (vulkan_d3d12.dll - Mesa Dozen or equivalent)
+    ///         ↓
+    ///   Xbox D3D12 / GameCore
     ///
-    /// DXVK translates Vulkan API calls to Direct3D 12 calls, allowing
-    /// Ryujinx's existing Vulkan renderer to work on Xbox's D3D12 driver.
+    /// This is NOT DXVK (which goes DirectX → Vulkan, the wrong direction).
+    /// Instead, we use a Vulkan ICD that implements Vulkan on top of D3D12,
+    /// such as Mesa's "dozen" driver or a purpose-built translation layer.
+    ///
+    /// The Vulkan ICD is loaded by overriding VK_ICD_FILENAMES to point to
+    /// our shipped ICD manifest, bypassing the default Vulkan loader discovery.
     /// </summary>
     public static class DxvkBootstrap
     {
         /// <summary>
-        /// Name of the DXVK Vulkan-to-D3D12 translation library.
+        /// Name of the Vulkan-over-D3D12 ICD library.
+        /// Mesa's dozen driver or equivalent implementation.
         /// </summary>
-        private const string DxvkLibraryName = "dxvk_d3d12";
+        private const string VulkanIcdLibraryName = "vulkan_dzn";
+        private const string VulkanIcdManifestName = "xbox_vulkan_icd.json";
 
-        /// <summary>
-        /// Whether DXVK has been successfully initialized.
-        /// </summary>
         public static bool IsInitialized { get; private set; }
-
-        /// <summary>
-        /// The handle to the loaded DXVK library.
-        /// </summary>
         private static nint _libraryHandle;
 
         /// <summary>
-        /// Initializes DXVK for Xbox, loading the Vulkan-to-D3D12 translation layer.
+        /// Initializes the Vulkan-over-D3D12 ICD for Xbox.
         ///
-        /// This must be called before any Vulkan API calls are made.
-        /// It sets up the environment so that vkCreateInstance and related calls
-        /// are intercepted by DXVK and translated to D3D12.
+        /// Steps:
+        /// 1. Disable implicit Vulkan layers (no desktop GPU drivers on Xbox)
+        /// 2. Point VK_ICD_FILENAMES to our D3D12-backed Vulkan ICD
+        /// 3. Load the ICD library to verify it's present
         /// </summary>
-        /// <param name="dxvkLibraryPath">
-        /// Path to the DXVK library. On Xbox, this would typically be in the app package.
-        /// </param>
-        public static void Initialize(string dxvkLibraryPath = null)
+        /// <param name="icdPath">Optional explicit path to the ICD library.</param>
+        public static void Initialize(string icdPath = null)
         {
             if (IsInitialized)
             {
-                Logger.Warning?.Print(LogClass.Gpu, "DXVK is already initialized.");
+                Logger.Warning?.Print(LogClass.Gpu, "Vulkan D3D12 ICD already initialized.");
                 return;
             }
 
-            Logger.Info?.Print(LogClass.Gpu, "Initializing DXVK Vulkan-to-D3D12 translation layer...");
+            Logger.Info?.Print(LogClass.Gpu, "Initializing Vulkan-over-D3D12 ICD for Xbox...");
 
-            // Disable any implicit Vulkan layers that might interfere
+            // Disable implicit desktop Vulkan layers
             DisableImplicitLayers();
 
-            // Load the DXVK library
-            string libraryPath = dxvkLibraryPath ?? FindDxvkLibrary();
+            // Find and register the ICD
+            string manifestPath = icdPath ?? FindIcdManifest();
 
-            if (string.IsNullOrEmpty(libraryPath))
+            if (!string.IsNullOrEmpty(manifestPath))
+            {
+                // Tell the Vulkan loader to use only our ICD
+                Environment.SetEnvironmentVariable("VK_ICD_FILENAMES", manifestPath);
+                Environment.SetEnvironmentVariable("VK_DRIVER_FILES", manifestPath);
+                Logger.Info?.Print(LogClass.Gpu, $"VK_ICD_FILENAMES set to: {manifestPath}");
+            }
+            else
             {
                 Logger.Warning?.Print(LogClass.Gpu,
-                    "DXVK library not found. Falling back to system Vulkan loader. " +
-                    "This is expected during development on non-Xbox platforms.");
-                return;
+                    "Vulkan D3D12 ICD manifest not found. Falling back to system Vulkan loader. " +
+                    "This is expected on non-Xbox platforms.");
             }
 
-            if (!NativeLibrary.TryLoad(libraryPath, out _libraryHandle))
+            // Try to load the ICD library directly to verify it exists
+            string libraryPath = FindIcdLibrary();
+            if (!string.IsNullOrEmpty(libraryPath) && NativeLibrary.TryLoad(libraryPath, out _libraryHandle))
             {
-                Logger.Error?.Print(LogClass.Gpu, $"Failed to load DXVK library from: {libraryPath}");
-                return;
+                IsInitialized = true;
+                Logger.Info?.Print(LogClass.Gpu, $"Vulkan D3D12 ICD loaded: {libraryPath}");
             }
-
-            IsInitialized = true;
-            Logger.Info?.Print(LogClass.Gpu, $"DXVK initialized from: {libraryPath}");
+            else
+            {
+                // Not fatal - the Vulkan loader may still find a usable ICD
+                Logger.Warning?.Print(LogClass.Gpu,
+                    "Could not directly load Vulkan D3D12 ICD. " +
+                    "The Vulkan loader will attempt standard driver discovery.");
+            }
         }
 
-        /// <summary>
-        /// Disables implicit Vulkan layers that are present on desktop Windows
-        /// but would interfere with DXVK on Xbox.
-        /// </summary>
         private static void DisableImplicitLayers()
         {
-            // Setting this environment variable prevents the Vulkan loader from
-            // scanning for and loading implicit layers, which are not relevant on Xbox
-            // and could cause issues with DXVK.
             Environment.SetEnvironmentVariable("VK_LOADER_LAYERS_DISABLE", "*");
-
-            // Disable Vulkan validation layers in non-debug builds
             Environment.SetEnvironmentVariable("VK_LAYER_PATH", "");
-
-            Logger.Info?.Print(LogClass.Gpu, "Implicit Vulkan layers disabled for Xbox DXVK mode.");
+            Logger.Info?.Print(LogClass.Gpu, "Implicit Vulkan layers disabled.");
         }
 
-        /// <summary>
-        /// Attempts to find the DXVK library in standard locations.
-        /// </summary>
-        private static string FindDxvkLibrary()
+        private static string FindIcdManifest()
         {
             string[] searchPaths =
             [
-                // App package directory (Xbox UWP)
-                Path.Combine(AppContext.BaseDirectory, $"{DxvkLibraryName}.dll"),
-                // External directory
-                Path.Combine(AppContext.BaseDirectory, "external", "dxvk", $"{DxvkLibraryName}.dll"),
-                // Development path
-                Path.Combine(AppContext.BaseDirectory, "..", "external", "dxvk", $"{DxvkLibraryName}.dll"),
+                Path.Combine(AppContext.BaseDirectory, VulkanIcdManifestName),
+                Path.Combine(AppContext.BaseDirectory, "vulkan", VulkanIcdManifestName),
+                Path.Combine(AppContext.BaseDirectory, "external", "vulkan", VulkanIcdManifestName),
             ];
 
             foreach (string path in searchPaths)
             {
                 if (File.Exists(path))
-                {
+                    return Path.GetFullPath(path);
+            }
+
+            return null;
+        }
+
+        private static string FindIcdLibrary()
+        {
+            string dllName = $"{VulkanIcdLibraryName}.dll";
+            string[] searchPaths =
+            [
+                Path.Combine(AppContext.BaseDirectory, dllName),
+                Path.Combine(AppContext.BaseDirectory, "vulkan", dllName),
+                Path.Combine(AppContext.BaseDirectory, "external", "vulkan", dllName),
+            ];
+
+            foreach (string path in searchPaths)
+            {
+                if (File.Exists(path))
                     return path;
-                }
             }
 
             return null;
         }
 
         /// <summary>
-        /// Gets a function pointer from the loaded DXVK library.
+        /// Gets vkGetInstanceProcAddr from the loaded ICD.
         /// Used to override Vulkan function resolution.
         /// </summary>
-        /// <param name="functionName">The name of the Vulkan function.</param>
-        /// <returns>The function pointer, or IntPtr.Zero if not found.</returns>
-        public static nint GetDxvkProcAddress(string functionName)
+        public static nint GetVkGetInstanceProcAddr()
         {
-            if (!IsInitialized || _libraryHandle == nint.Zero)
-            {
-                return nint.Zero;
-            }
+            if (_libraryHandle == nint.Zero) return nint.Zero;
 
-            if (NativeLibrary.TryGetExport(_libraryHandle, functionName, out nint address))
-            {
-                return address;
-            }
+            if (NativeLibrary.TryGetExport(_libraryHandle, "vkGetInstanceProcAddr", out nint addr))
+                return addr;
 
             return nint.Zero;
         }
 
-        /// <summary>
-        /// Shuts down DXVK and releases the loaded library.
-        /// </summary>
         public static void Shutdown()
         {
-            if (!IsInitialized)
-            {
-                return;
-            }
-
             if (_libraryHandle != nint.Zero)
             {
                 NativeLibrary.Free(_libraryHandle);
@@ -159,7 +156,7 @@ namespace Ryujinx.Graphics.Xbox
             }
 
             IsInitialized = false;
-            Logger.Info?.Print(LogClass.Gpu, "DXVK shut down.");
+            Logger.Info?.Print(LogClass.Gpu, "Vulkan D3D12 ICD shut down.");
         }
     }
 }
