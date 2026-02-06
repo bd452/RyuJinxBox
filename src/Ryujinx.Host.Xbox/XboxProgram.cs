@@ -175,7 +175,12 @@ namespace Ryujinx.Host.Xbox
                 0,      // fsLogMode
                 0,      // timeOffset
                 null,   // timezone
-                MemoryManagerMode.HostMappedUnsafe,
+                // HostMappedUnsafe uses VirtualAlloc2 with MEM_RESERVE_PLACEHOLDER and MapViewOfFile3
+                // from KernelBase.dll, which may not be available in the Xbox UWP sandbox.
+                // SoftwarePageTable avoids all placeholder memory APIs and works everywhere.
+                // It's slower but compatible. If VirtualAlloc2 is confirmed working on Xbox,
+                // this can be changed to HostMapped or HostMappedUnsafe for better performance.
+                MemoryManagerMode.SoftwarePageTable,
                 false,  // ignoreMissingServices
                 AspectRatio.Fixed16x9,
                 1.0f,   // audioVolume

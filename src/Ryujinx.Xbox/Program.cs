@@ -336,6 +336,12 @@ namespace Ryujinx.Xbox
         }
     }
 
+    /// <summary>
+    /// Log target that works in both console and UWP environments.
+    /// Uses System.Diagnostics.Debug.WriteLine which routes to the debugger output
+    /// window on Xbox (visible in Visual Studio or Xbox Device Portal).
+    /// Console.WriteLine does nothing in UWP apps.
+    /// </summary>
     internal class ConsoleLogTarget : Ryujinx.Common.Logging.Targets.ILogTarget
     {
         public string Name { get; }
@@ -343,7 +349,13 @@ namespace Ryujinx.Xbox
 
         public void Log(object sender, LogEventArgs args)
         {
-            Console.WriteLine($"[{args.Level}] {args.Message}");
+            string message = $"[{args.Level}] {args.Message}";
+
+            // Debug.WriteLine goes to the attached debugger / Device Portal on Xbox
+            System.Diagnostics.Debug.WriteLine(message);
+
+            // Console.WriteLine only works on desktop, silently ignored in UWP
+            try { Console.WriteLine(message); } catch { /* UWP has no console */ }
         }
 
         public void Dispose() { }

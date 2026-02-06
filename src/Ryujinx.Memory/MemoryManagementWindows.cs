@@ -55,7 +55,21 @@ namespace Ryujinx.Memory
 
         private static nint AllocateInternal2(nint size, AllocationType flags = 0)
         {
-            nint ptr = WindowsApi.VirtualAlloc2(WindowsApi.CurrentProcessHandle, nint.Zero, size, flags, MemoryProtection.NoAccess, nint.Zero, 0);
+            nint ptr;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: VirtualAlloc2 from KernelBase.dll may not be available.
+                // Fall back to VirtualAllocFromApp without placeholder support.
+                // This means view-compatible memory won't work, but SoftwarePageTable
+                // mode doesn't need it.
+                AllocationType fallbackFlags = flags & ~AllocationType.ReservePlaceholder;
+                ptr = WindowsApi.VirtualAllocFromApp(nint.Zero, size, fallbackFlags, (uint)MemoryProtection.NoAccess);
+            }
+            else
+            {
+                ptr = WindowsApi.VirtualAlloc2(WindowsApi.CurrentProcessHandle, nint.Zero, size, flags, MemoryProtection.NoAccess, nint.Zero, 0);
+            }
 
             if (ptr == nint.Zero)
             {
@@ -94,11 +108,25 @@ namespace Ryujinx.Memory
 
         public static void MapView(nint sharedMemory, ulong srcOffset, nint location, nint size, MemoryBlock owner)
         {
+            if (WindowsApi.IsUwpSandbox)
+            {
+                throw new PlatformNotSupportedException(
+                    "View-compatible memory mapping (MapViewOfFile3) is not available in the Xbox UWP sandbox. " +
+                    "Use MemoryManagerMode.SoftwarePageTable instead of HostMapped/HostMappedUnsafe.");
+            }
+
             _placeholders.MapView(sharedMemory, srcOffset, location, size, owner);
         }
 
         public static void UnmapView(nint sharedMemory, nint location, nint size, MemoryBlock owner)
         {
+            if (WindowsApi.IsUwpSandbox)
+            {
+                throw new PlatformNotSupportedException(
+                    "View-compatible memory mapping (UnmapViewOfFile2) is not available in the Xbox UWP sandbox. " +
+                    "Use MemoryManagerMode.SoftwarePageTable instead of HostMapped/HostMappedUnsafe.");
+            }
+
             _placeholders.UnmapView(sharedMemory, location, size, owner);
         }
 
