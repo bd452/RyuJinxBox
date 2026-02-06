@@ -31,9 +31,19 @@ namespace Ryujinx.Memory
             return AllocateInternal(size, AllocationType.Reserve);
         }
 
-        private static nint AllocateInternal(nint size, AllocationType flags = 0)
+        private static nint AllocateInternal(nint size, AllocationType flags = 0, MemoryProtection protection = MemoryProtection.ReadWrite)
         {
-            nint ptr = WindowsApi.VirtualAlloc(nint.Zero, size, flags, MemoryProtection.ReadWrite);
+            nint ptr;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: Use VirtualAllocFromApp which accepts a uint protection parameter
+                ptr = WindowsApi.VirtualAllocFromApp(nint.Zero, size, flags, (uint)protection);
+            }
+            else
+            {
+                ptr = WindowsApi.VirtualAlloc(nint.Zero, size, flags, protection);
+            }
 
             if (ptr == nint.Zero)
             {
@@ -57,7 +67,18 @@ namespace Ryujinx.Memory
 
         public static void Commit(nint location, nint size)
         {
-            if (WindowsApi.VirtualAlloc(location, size, AllocationType.Commit, MemoryProtection.ReadWrite) == nint.Zero)
+            nint result;
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                result = WindowsApi.VirtualAllocFromApp(location, size, AllocationType.Commit, (uint)MemoryProtection.ReadWrite);
+            }
+            else
+            {
+                result = WindowsApi.VirtualAlloc(location, size, AllocationType.Commit, MemoryProtection.ReadWrite);
+            }
+
+            if (result == nint.Zero)
             {
                 throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
             }
@@ -87,6 +108,11 @@ namespace Ryujinx.Memory
             {
                 return _placeholders.ReprotectView(address, size, permission);
             }
+
+            if (WindowsApi.IsUwpSandbox)
+            {
+                return WindowsApi.VirtualProtectFromApp(address, size, (uint)WindowsApi.GetProtection(permission), out _);
+            }
             else
             {
                 return WindowsApi.VirtualProtect(address, size, WindowsApi.GetProtection(permission), out _);
@@ -102,15 +128,33 @@ namespace Ryujinx.Memory
 
         public static nint CreateSharedMemory(nint size, bool reserve)
         {
-            FileMapProtection prot = reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit;
+            nint handle;
 
-            nint handle = WindowsApi.CreateFileMapping(
-                WindowsApi.InvalidHandleValue,
-                nint.Zero,
-                FileMapProtection.PageReadWrite | prot,
-                (uint)(size.ToInt64() >> 32),
-                (uint)size.ToInt64(),
-                null);
+            if (WindowsApi.IsUwpSandbox)
+            {
+                // Xbox UWP: CreateFileMappingFromApp uses a different signature
+                uint prot = (uint)(FileMapProtection.PageReadWrite |
+                    (reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit));
+
+                handle = WindowsApi.CreateFileMappingFromApp(
+                    WindowsApi.InvalidHandleValue,
+                    nint.Zero,
+                    prot,
+                    (ulong)size.ToInt64(),
+                    null);
+            }
+            else
+            {
+                FileMapProtection prot = reserve ? FileMapProtection.SectionReserve : FileMapProtection.SectionCommit;
+
+                handle = WindowsApi.CreateFileMapping(
+                    WindowsApi.InvalidHandleValue,
+                    nint.Zero,
+                    FileMapProtection.PageReadWrite | prot,
+                    (uint)(size.ToInt64() >> 32),
+                    (uint)size.ToInt64(),
+                    null);
+            }
 
             if (handle == nint.Zero)
             {

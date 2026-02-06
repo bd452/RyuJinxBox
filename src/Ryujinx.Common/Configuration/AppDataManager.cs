@@ -44,7 +44,15 @@ namespace Ryujinx.Common.Configuration
 
         static AppDataManager()
         {
-            KeysDirPathUser = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".switch");
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            // On Xbox UWP, UserProfile may be empty. Fall back to the app base directory.
+            if (string.IsNullOrEmpty(userProfile))
+            {
+                userProfile = AppDomain.CurrentDomain.BaseDirectory;
+            }
+
+            KeysDirPathUser = Path.Combine(userProfile, ".switch");
         }
 
         public static void Initialize(string baseDirPath)
@@ -54,6 +62,17 @@ namespace Ryujinx.Common.Configuration
             if (appDataPath.Length == 0)
             {
                 appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            }
+
+            // On Xbox UWP / sandboxed environments, GetFolderPath may return empty.
+            // If a custom baseDirPath was provided (e.g., from Xbox LocalFolder), use it directly.
+            if (appDataPath.Length == 0 && !string.IsNullOrEmpty(baseDirPath))
+            {
+                BaseDirPath = baseDirPath;
+                Mode = LaunchMode.Custom;
+                BaseDirPath = Path.GetFullPath(BaseDirPath);
+                SetupBasePaths();
+                return;
             }
 
             string userProfilePath = Path.Combine(appDataPath, DefaultBaseDir);
