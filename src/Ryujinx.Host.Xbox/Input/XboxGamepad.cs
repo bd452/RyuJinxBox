@@ -23,15 +23,23 @@ namespace Ryujinx.Host.Xbox.Input
         private const float DefaultDeadzone = 0.10f;
         private const float DefaultTriggerThreshold = 0.50f;
 
+        /// <summary>
+        /// Minimum interval between GameInput polls in ticks.
+        /// Prevents reading hardware state dozens of times per frame
+        /// (IsPressed and GetStick are called per-button/per-stick).
+        /// ~2ms cache window.
+        /// </summary>
+        private const long PollIntervalTicks = TimeSpan.TicksPerMillisecond * 2;
+
         private readonly nint _pGameInput;
         private readonly string _id;
         private readonly int _index;
         private float _triggerThreshold = DefaultTriggerThreshold;
         private StandardControllerInputConfig _configuration;
 
-        // Cached state from last poll
         private GameInputNative.GameInputGamepadState _currentState;
         private nint _currentDevice;
+        private long _lastPollTicks;
 
         public GamepadFeaturesFlag Features => GamepadFeaturesFlag.Rumble;
         public string Id => _id;
@@ -48,10 +56,18 @@ namespace Ryujinx.Host.Xbox.Input
 
         /// <summary>
         /// Reads the current state from hardware via GameInput.
+        /// Caches the result for PollIntervalTicks to avoid redundant reads
+        /// when IsPressed/GetStick are called multiple times per frame.
         /// </summary>
         private void PollState()
         {
             if (_pGameInput == nint.Zero) return;
+
+            long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+            if (now - _lastPollTicks < PollIntervalTicks)
+                return;
+
+            _lastPollTicks = now;
 
             int hr = GameInputNative.GetCurrentReading(
                 _pGameInput,

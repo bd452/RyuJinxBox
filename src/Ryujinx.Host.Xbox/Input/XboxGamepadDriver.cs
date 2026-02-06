@@ -19,6 +19,7 @@ namespace Ryujinx.Host.Xbox.Input
         private readonly object _lock = new();
         private readonly System.Threading.Timer _pollingTimer;
         private volatile bool _isDisposed;
+        private volatile bool _isSuspended;
 
         private nint _pGameInput;
 
@@ -63,9 +64,20 @@ namespace Ryujinx.Host.Xbox.Input
             _pollingTimer = new System.Threading.Timer(PollControllers, null, 0, 500);
         }
 
+        /// <summary>
+        /// Call when the Xbox app is suspending. Stops polling to avoid calling
+        /// GameInput while the app is suspended (which would crash).
+        /// </summary>
+        public void Suspend() => _isSuspended = true;
+
+        /// <summary>
+        /// Call when the Xbox app resumes.
+        /// </summary>
+        public void Resume() => _isSuspended = false;
+
         private void PollControllers(object state)
         {
-            if (_isDisposed || _pGameInput == nint.Zero) return;
+            if (_isDisposed || _isSuspended || _pGameInput == nint.Zero) return;
 
             try
             {

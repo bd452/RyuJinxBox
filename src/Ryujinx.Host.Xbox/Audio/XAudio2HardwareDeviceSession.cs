@@ -6,6 +6,7 @@ using Ryujinx.Host.Xbox.Native;
 using Ryujinx.Memory;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -24,8 +25,16 @@ namespace Ryujinx.Host.Xbox.Audio
         private readonly int _bytesPerFrame;
         private readonly uint _sampleCount;
 
+        /// <summary>
+        /// Tracks pinned GCHandles for buffers submitted to XAudio2.
+        /// XAudio2 reads from these buffers asynchronously, so they must stay pinned
+        /// until playback completes. We free them when GetState shows they've been consumed.
+        /// </summary>
+        private readonly Queue<GCHandle> _pinnedBuffers;
+
         private nint _pSourceVoice;
         private ulong _playedSampleCount;
+        private uint _totalBuffersSubmitted;
         private float _volume;
         private bool _started;
         private bool _isDisposed;
@@ -42,6 +51,7 @@ namespace Ryujinx.Host.Xbox.Audio
             _updateRequiredEvent = _driver.GetUpdateRequiredEvent();
             _queuedBuffers = new ConcurrentQueue<XAudio2AudioBuffer>();
             _ringBuffer = new DynamicRingBuffer();
+            _pinnedBuffers = new Queue<GCHandle>();
             _volume = 1.0f;
 
             _bytesPerFrame = BackendHelper.GetSampleSize(RequestedSampleFormat) * (int)RequestedChannelCount;
@@ -83,11 +93,6 @@ namespace Ryujinx.Host.Xbox.Audio
                 Logger.Error?.Print(LogClass.Audio, $"CreateSourceVoice failed with HRESULT 0x{hr:X8}");
                 _pSourceVoice = nint.Zero;
             }
-            else
-            {
-                Logger.Debug?.Print(LogClass.Audio,
-                    $"XAudio2 source voice created: {RequestedChannelCount}ch, {RequestedSampleRate}Hz, {RequestedSampleFormat}");
-            }
         }
 
         public override void QueueBuffer(AudioBuffer buffer)
@@ -107,6 +112,9 @@ namespace Ryujinx.Host.Xbox.Audio
         private void SubmitRingBufferData()
         {
             if (_pSourceVoice == nint.Zero) return;
+
+            // Free completed buffers first
+            FreeCompletedBuffers();
 
             // Check how many buffers XAudio2 currently has queued
             XAudio2Native.SourceVoiceGetState(_pSourceVoice, out var state, 0);
@@ -134,7 +142,7 @@ namespace Ryujinx.Host.Xbox.Audio
             {
                 AudioBytes = (uint)bytesToRead,
                 pAudioData = (byte*)handle.AddrOfPinnedObject(),
-                pContext = GCHandle.ToIntPtr(handle),
+                pContext = nint.Zero,
             };
 
             int hr = XAudio2Native.SourceVoiceSubmitSourceBuffer(_pSourceVoice, &xaBuffer);
@@ -145,7 +153,11 @@ namespace Ryujinx.Host.Xbox.Audio
                 return;
             }
 
-            // Track sample count
+            // Track the pinned handle so we can free it when XAudio2 is done
+            _pinnedBuffers.Enqueue(handle);
+            _totalBuffersSubmitted++;
+
+            // Track sample count for emulator buffer tracking
             ulong samplesSubmitted = GetSampleCount(bytesToRead);
             Interlocked.Add(ref _playedSampleCount, samplesSubmitted);
 
@@ -170,6 +182,34 @@ namespace Ryujinx.Host.Xbox.Audio
             if (needUpdate)
             {
                 _updateRequiredEvent.Set();
+            }
+        }
+
+        /// <summary>
+        /// Frees GCHandles for buffers that XAudio2 has finished playing.
+        /// Compares the number of buffers currently queued in XAudio2 against
+        /// our total submitted count to determine how many have completed.
+        /// </summary>
+        private void FreeCompletedBuffers()
+        {
+            if (_pSourceVoice == nint.Zero || _pinnedBuffers.Count == 0) return;
+
+            XAudio2Native.SourceVoiceGetState(_pSourceVoice, out var state, 0);
+
+            // Number of buffers that have completed = total submitted - still queued
+            int completedCount = (int)(_totalBuffersSubmitted - state.BuffersQueued);
+            int toFree = Math.Min(completedCount, _pinnedBuffers.Count);
+
+            // The completed count should always be >= pinnedBuffers that need freeing,
+            // but clamp to be safe
+            toFree = Math.Max(0, toFree);
+
+            // Free the oldest handles (they complete in FIFO order)
+            while (toFree > 0 && _pinnedBuffers.TryDequeue(out GCHandle handle))
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+                toFree--;
             }
         }
 
@@ -238,15 +278,19 @@ namespace Ryujinx.Host.Xbox.Audio
                 _pSourceVoice = nint.Zero;
             }
 
+            // Free all remaining pinned buffers
+            while (_pinnedBuffers.TryDequeue(out GCHandle handle))
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            }
+
             _driver.UnregisterSession(this);
 
             while (_queuedBuffers.TryDequeue(out _)) { }
         }
     }
 
-    /// <summary>
-    /// Tracks an audio buffer submitted to XAudio2.
-    /// </summary>
     internal class XAudio2AudioBuffer
     {
         public readonly ulong DriverIdentifier;

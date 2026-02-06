@@ -209,12 +209,24 @@ namespace Ryujinx.Host.Xbox
         /// </summary>
         private static unsafe SurfaceKHR CreateVulkanSurface(Instance instance, Vk api)
         {
-            nint hwnd = CoreWindowNative.GetXboxWindowHandle();
+            // The surface creation callback is invoked during VulkanRenderer.Initialize(),
+            // which runs on the render thread. The CoreWindow HWND should exist by now,
+            // but on Xbox the window might not be fully ready. Retry briefly.
+            nint hwnd = nint.Zero;
             nint hinstance = CoreWindowNative.GetHInstance();
+
+            for (int attempt = 0; attempt < 50; attempt++)
+            {
+                hwnd = CoreWindowNative.GetXboxWindowHandle();
+                if (hwnd != nint.Zero)
+                    break;
+
+                Thread.Sleep(100);
+            }
 
             if (hwnd == nint.Zero)
             {
-                Logger.Error?.Print(LogClass.Gpu, "No window handle available for Vulkan surface creation.");
+                Logger.Error?.Print(LogClass.Gpu, "No window handle available for Vulkan surface creation after retries.");
                 return default;
             }
 

@@ -1,18 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Exe</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+    <TieredPGO>true</TieredPGO>
+
+    <!-- Xbox build marker -->
+    <DefineConstants>$(DefineConstants);XBOX</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Windows-specific settings only applied when targeting Windows -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- Publish settings - only used during dotnet publish, not during regular build -->
+  <PropertyGroup Condition="'$(PublishDir)' != ''">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
     <SelfContained>true</SelfContained>
     <PublishReadyToRun>true</PublishReadyToRun>
-    <TieredPGO>true</TieredPGO>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-
-    <!-- Xbox build marker -->
-    <DefineConstants>$(DefineConstants);XBOX</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,7 +31,7 @@
   </ItemGroup>
 
   <!-- Copy Vulkan ICD manifest alongside the output -->
-  <ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <None Include="..\..\build\xbox\xbox_vulkan_icd.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

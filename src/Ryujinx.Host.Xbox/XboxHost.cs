@@ -1,7 +1,6 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.Host.Xbox.Audio;
 using Ryujinx.Host.Xbox.Input;
-using Ryujinx.Host.Xbox.Memory;
 using System;
 
 namespace Ryujinx.Host.Xbox
@@ -22,7 +21,6 @@ namespace Ryujinx.Host.Xbox
         public XAudio2HardwareDeviceDriver AudioDriver { get; private set; }
         public XboxGamepadDriver GamepadDriver { get; private set; }
         public XboxLogTarget LogTarget { get; private set; }
-        public XboxMemoryAllocator MemoryAllocator { get; private set; }
 
         public XboxHost(string localFolder, string temporaryFolder)
         {
@@ -52,12 +50,10 @@ namespace Ryujinx.Host.Xbox
             AudioDriver = new XAudio2HardwareDeviceDriver();
             GamepadDriver = new XboxGamepadDriver();
 
-            MemoryAllocator = new XboxMemoryAllocator();
-
-            if (OperatingSystem.IsWindows())
-            {
-                XboxExceptionHandler.Install(HandleJitFault);
-            }
+            // NOTE: Do NOT install XboxExceptionHandler here.
+            // The core Ryujinx CPU emulation (NativeSignalHandler) installs its own
+            // vectored exception handler for JIT fault dispatch. Installing a second
+            // VEH would conflict with it. The core handler is sufficient.
 
             Lifecycle.OnSuspending += OnSuspending;
             Lifecycle.OnResuming += OnResuming;
@@ -68,11 +64,13 @@ namespace Ryujinx.Host.Xbox
         private void OnSuspending()
         {
             Logger.Info?.Print(LogClass.Application, "Xbox host suspending...");
+            GamepadDriver?.Suspend();
         }
 
         private void OnResuming()
         {
             Logger.Info?.Print(LogClass.Application, "Xbox host resuming...");
+            GamepadDriver?.Resume();
         }
 
         private bool HandleJitFault(ulong faultAddress)
@@ -88,15 +86,9 @@ namespace Ryujinx.Host.Xbox
 
             Logger.Info?.Print(LogClass.Application, "Disposing Xbox host...");
 
-            if (OperatingSystem.IsWindows())
-            {
-                XboxExceptionHandler.Uninstall();
-            }
-
             Lifecycle.OnSuspending -= OnSuspending;
             Lifecycle.OnResuming -= OnResuming;
 
-            MemoryAllocator?.Dispose();
             GamepadDriver?.Dispose();
             AudioDriver?.Dispose();
             LogTarget?.Dispose();
