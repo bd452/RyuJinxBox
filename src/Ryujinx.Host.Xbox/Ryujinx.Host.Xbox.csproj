@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <PackageReference Include="Silk.NET.Vulkan" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
   </ItemGroup>
 
 </Project>
