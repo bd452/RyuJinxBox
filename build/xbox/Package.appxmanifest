@@ -41,12 +41,31 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1E1E1E" />
       </uap:VisualElements>
+
+      <!-- File type associations for removableStorage access to USB drives -->
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="switchrom">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.xci</uap:FileType>
+              <uap:FileType>.nsp</uap:FileType>
+              <uap:FileType>.nca</uap:FileType>
+              <uap:FileType>.nro</uap:FileType>
+              <uap:FileType>.nso</uap:FileType>
+              <uap:FileType>.pfs0</uap:FileType>
+              <uap:FileType>.keys</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
     </Application>
   </Applications>
 
   <Capabilities>
     <Capability Name="internetClient" />
+    <uap:Capability Name="removableStorage" />
     <rescap:Capability Name="expandedResources" />
+    <rescap:Capability Name="broadFileSystemAccess" />
   </Capabilities>
 
 </Package>
