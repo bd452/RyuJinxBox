@@ -111,6 +111,13 @@ namespace Ryujinx.Memory
 
             if (WindowsApi.IsUwpSandbox)
             {
+                // Xbox UWP enforces W^X: PAGE_EXECUTE_READWRITE is forbidden.
+                // Downgrade RWX requests to RW (callers follow up with RX when done writing).
+                if (permission == MemoryPermission.ReadWriteExecute)
+                {
+                    permission = MemoryPermission.ReadAndWrite;
+                }
+
                 return WindowsApi.VirtualProtectFromApp(address, size, (uint)WindowsApi.GetProtection(permission), out _);
             }
             else

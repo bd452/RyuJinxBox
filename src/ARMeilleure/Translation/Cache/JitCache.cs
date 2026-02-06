@@ -162,7 +162,10 @@ namespace ARMeilleure.Translation.Cache
             int regionStart = offset & ~_pageMask;
             int regionEnd = (endOffs + _pageMask) & ~_pageMask;
 
-            region.Block.MapAsRwx((ulong)regionStart, (ulong)(regionEnd - regionStart));
+            // Use MapAsRw instead of MapAsRwx to comply with W^X enforcement.
+            // On Xbox UWP, PAGE_EXECUTE_READWRITE is blocked by the OS.
+            // The page only needs to be writable here; it becomes executable in ReprotectAsExecutable.
+            region.Block.MapAsRw((ulong)regionStart, (ulong)(regionEnd - regionStart));
         }
 
         private static void ReprotectAsExecutable(ReservedRegion region, int offset, int size)
