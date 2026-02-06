@@ -1,5 +1,4 @@
 using Ryujinx.Common.Logging;
-using Ryujinx.Host.Xbox;
 using System;
 
 namespace Ryujinx.Graphics.Xbox
@@ -10,93 +9,81 @@ namespace Ryujinx.Graphics.Xbox
     /// Architecture:
     ///   Ryujinx Vulkan Renderer (SPIR-V)
     ///         ↓
-    ///   DXVK (Vulkan → D3D12 translation)
+    ///   Vulkan ICD (D3D12-backed, e.g. Mesa Dozen)
     ///         ↓
     ///   Xbox D3D12 / GameCore
-    ///
-    /// Ryujinx believes it is running on a normal Vulkan host.
-    /// All Xbox-specific graphics work is concentrated here.
     /// </summary>
     public sealed class XboxGraphicsInitializer : IDisposable
     {
-        private readonly XboxFileSystem _fileSystem;
-        private readonly XboxPerformanceProfile _profile;
+        private readonly string _shaderCachePath;
+        private readonly string _pipelineCachePath;
+        private readonly int _maxShaderCacheEntries;
+        private readonly long _maxPipelineCacheSize;
+        private readonly bool _isSeriesS;
         private bool _isInitialized;
         private bool _isDisposed;
 
-        /// <summary>
-        /// The pipeline cache manager for this session.
-        /// </summary>
         public XboxPipelineCacheManager PipelineCacheManager { get; private set; }
 
         /// <summary>
         /// Creates a new Xbox graphics initializer.
         /// </summary>
-        /// <param name="fileSystem">The Xbox filesystem for cache path resolution.</param>
-        /// <param name="profile">The performance profile for the current hardware.</param>
-        public XboxGraphicsInitializer(XboxFileSystem fileSystem, XboxPerformanceProfile profile)
+        /// <param name="shaderCachePath">Path for shader cache storage.</param>
+        /// <param name="pipelineCachePath">Path for pipeline cache storage.</param>
+        /// <param name="maxShaderCacheEntries">Max shader cache entries before LRU eviction.</param>
+        /// <param name="maxPipelineCacheSize">Max pipeline cache size in bytes.</param>
+        /// <param name="isSeriesS">True if running on Series S (apply performance overrides).</param>
+        public XboxGraphicsInitializer(
+            string shaderCachePath,
+            string pipelineCachePath,
+            int maxShaderCacheEntries,
+            long maxPipelineCacheSize,
+            bool isSeriesS)
         {
-            _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
-            _profile = profile ?? throw new ArgumentNullException(nameof(profile));
+            _shaderCachePath = shaderCachePath ?? throw new ArgumentNullException(nameof(shaderCachePath));
+            _pipelineCachePath = pipelineCachePath ?? throw new ArgumentNullException(nameof(pipelineCachePath));
+            _maxShaderCacheEntries = maxShaderCacheEntries;
+            _maxPipelineCacheSize = maxPipelineCacheSize;
+            _isSeriesS = isSeriesS;
         }
 
         /// <summary>
         /// Initializes the entire Xbox graphics stack in the correct order.
-        ///
-        /// Order of operations:
-        /// 1. Configure DXVK environment
-        /// 2. Bootstrap DXVK library
-        /// 3. Install Vulkan loader overrides
-        /// 4. Initialize pipeline cache
-        /// 5. Apply hardware-specific overrides
         /// </summary>
         public void Initialize()
         {
-            if (_isInitialized)
-            {
-                return;
-            }
+            if (_isInitialized) return;
 
             Logger.Info?.Print(LogClass.Gpu, "Initializing Xbox graphics stack...");
 
-            // Step 1: Configure DXVK environment variables
-            DxvkConfiguration.Apply(_fileSystem.ShaderCachePath, _fileSystem.PipelineCachePath);
+            // Step 1: Configure DXVK/ICD environment
+            DxvkConfiguration.Apply(_shaderCachePath, _pipelineCachePath);
 
             // Step 2: Apply hardware-specific overrides
-            switch (_profile.HardwareModel)
-            {
-                case XboxHardwareModel.SeriesS:
-                    DxvkConfiguration.ApplySeriesSOverrides();
-                    break;
-                case XboxHardwareModel.SeriesX:
-                    DxvkConfiguration.ApplySeriesXOverrides();
-                    break;
-            }
+            if (_isSeriesS)
+                DxvkConfiguration.ApplySeriesSOverrides();
+            else
+                DxvkConfiguration.ApplySeriesXOverrides();
 
-            // Step 3: Bootstrap DXVK
+            // Step 3: Bootstrap the Vulkan-over-D3D12 ICD
             DxvkBootstrap.Initialize();
 
             // Step 4: Install Vulkan loader overrides
             XboxVulkanLoader.Install();
 
-            // Step 5: Initialize pipeline cache manager
+            // Step 5: Initialize pipeline cache
             PipelineCacheManager = new XboxPipelineCacheManager(
-                _fileSystem.PipelineCachePath,
-                _profile.MaxShaderCacheEntries,
-                _profile.MaxPipelineCacheSize);
-
+                _pipelineCachePath,
+                _maxShaderCacheEntries,
+                _maxPipelineCacheSize);
             PipelineCacheManager.LoadFromDisk();
 
             _isInitialized = true;
 
             Logger.Info?.Print(LogClass.Gpu,
-                $"Xbox graphics stack initialized. Hardware: {_profile.HardwareModel}, " +
-                $"DXVK: {DxvkBootstrap.IsInitialized}, Vulkan override: {XboxVulkanLoader.IsActive}");
+                $"Xbox graphics stack initialized. ICD: {DxvkBootstrap.IsInitialized}, Loader: {XboxVulkanLoader.IsActive}");
         }
 
-        /// <summary>
-        /// Persists all caches to disk. Should be called during suspension and shutdown.
-        /// </summary>
         public void FlushCaches()
         {
             PipelineCacheManager?.FlushToDisk();
@@ -105,17 +92,11 @@ namespace Ryujinx.Graphics.Xbox
 
         public void Dispose()
         {
-            if (_isDisposed)
-            {
-                return;
-            }
-
+            if (_isDisposed) return;
             _isDisposed = true;
 
             PipelineCacheManager?.Dispose();
             DxvkBootstrap.Shutdown();
-
-            Logger.Info?.Print(LogClass.Gpu, "Xbox graphics stack disposed.");
         }
     }
 }
